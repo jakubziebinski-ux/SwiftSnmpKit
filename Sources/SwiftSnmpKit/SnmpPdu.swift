@@ -1,12 +1,12 @@
 //
 //  File.swift
-//  
+//
 //
 //  Created by Darrell Root on 6/30/22.
 //
-
+ 
 import Foundation
-
+ 
 /// SnmpPdu represents the PDU portion of a SNMP request
 /// Most notably the variable bindings which include the OIDs to
 /// request and the resulting values.
@@ -113,7 +113,7 @@ public struct SnmpPdu: Equatable, CustomStringConvertible, AsnData {
         }
         self.errorStatus = Int(errorStatus)
         pduPosition = pduPosition + errorStatusLength
-
+ 
         let errorIndexValue = try AsnValue(data: data[(pduPosition)...])
         let errorIndexLength = try AsnValue.pduLength(data: data[(pduPosition)...])
         guard case .integer(let errorIndex) = errorIndexValue else {
@@ -127,10 +127,22 @@ public struct SnmpPdu: Equatable, CustomStringConvertible, AsnData {
         let variableBindingPrefix = try AsnValue.prefixLength(data: data[(data.startIndex + pduPosition)...])
         pduPosition += variableBindingPrefix
         remainingVariableBindingOctets -= variableBindingPrefix
-        let variableBinding = try SnmpVariableBinding(data: data[(data.startIndex + pduPosition)...])
-        self.variableBindings = [variableBinding]
         
-        //TODO for now we assume one variable binding per SNMP message
+        //modified code to process multiple oids sended in request
+        var pduIndex = pduPosition
+        var bindings: [SnmpVariableBinding] = []
+        while remainingVariableBindingOctets > 0 {
+            let start = data.startIndex + pduIndex
+            let length = try AsnValue.pduLength(data: data[start...])
+            
+            let oneBindingData = data[start ..< start + length]
+            let oneBinding = try SnmpVariableBinding(data: oneBindingData)
+            bindings.append(oneBinding)
+            
+            pduIndex += length
+            remainingVariableBindingOctets -= length
+        }
+        self.variableBindings = bindings
         
     }
     /// This prints out the SNMP PDU type and the OIDs and values of each variable binding.
@@ -142,4 +154,3 @@ public struct SnmpPdu: Equatable, CustomStringConvertible, AsnData {
         return result
     }
 }
-

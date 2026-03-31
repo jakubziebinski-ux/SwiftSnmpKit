@@ -1,12 +1,12 @@
 //
 //  File.swift
-//  
+//
 //
 //  Created by Darrell Root on 7/1/22.
 //
-
+ 
 import Foundation
-
+ 
 /// Structure for the SNMP Message
 public struct SnmpV2Message: AsnData, CustomDebugStringConvertible {
     
@@ -53,18 +53,17 @@ public struct SnmpV2Message: AsnData, CustomDebugStringConvertible {
     ///   - version: SNMP version.  Default is v2c
     ///   - community: SNMP community
     ///   - command: SNMP command. Could be get or getNext.  Replies are not valid for this initializer.
-    ///   - oid: The SNMP OID to be requested
-    public init(version: SnmpVersion = .v2c, community: String, command: SnmpPduType, oid: SnmpOid) {
+    ///   - oids: The SNMP OIDs to be requested
+    public init(version: SnmpVersion = .v2c, community: String, command: SnmpPduType, oids: [SnmpOid]) {
         self.version = version
         self.community = community
         self.command = command
         //self.requestId = Int32.random(in: Int32.min...Int32.max)
         self.requestId = Int32.random(in: 1...Int32.max)
-
+ 
         self.errorStatus = 0
         self.errorIndex = 0
-        let variableBinding = SnmpVariableBinding(oid: oid)
-        self.variableBindings = [variableBinding]
+        self.variableBindings = oids.map {SnmpVariableBinding(oid: $0)}
     }
     /// Creates SNMP message data structure from the data encapsulated inside a UDP SNMP reply.
     ///

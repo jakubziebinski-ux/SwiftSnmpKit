@@ -39,6 +39,8 @@ public struct SnmpV3Message: CustomDebugStringConvertible {
             return SnmpV3Message.passwordToSha1Key(password: privPassword, engineId: self.engineId)
         case .sha256:
             return SnmpV3Message.passwordToSha256Key(password: privPassword, engineId: self.engineId)
+        case .sha512:
+            return SnmpV3Message.passwordToSha512Key(password: privPassword, engineId: self.engineId)
         }
     }
     /// see https://www.ietf.org/rfc/rfc3826.txt section 3.1.2.1
@@ -218,6 +220,34 @@ public struct SnmpV3Message: CustomDebugStringConvertible {
         let localizedKey = Data(localizedSha.finalize())
         return localizedKey[0..<32]
     }
+    internal static func passwordToSha512Key(password: String, engineId: Data) -> Data {
+        // https://datatracker.ietf.org/doc/html/rfc3414#appendix-A.2.2
+        guard password.count > 7 else {
+            fatalError("SNMP password must be at least 8 octets")
+        }
+        let passwordData = password.data(using: .utf8)!
+        let passwordLength = passwordData.count
+        
+        var circularPassword = Data(count: 64)
+        var totalBytes = 0
+        
+        var sha = SHA512()
+
+        while totalBytes < 1048576 {
+            for position in 0..<64 {
+                circularPassword[position] = passwordData[totalBytes % passwordLength]
+                totalBytes += 1
+            }
+            sha.update(data: circularPassword)
+        }
+        let interimShaKey = Data(sha.finalize())
+        var localizedSha = SHA512()
+        localizedSha.update(data: interimShaKey)
+        localizedSha.update(data: engineId)
+        localizedSha.update(data: interimShaKey)
+        let localizedKey = Data(localizedSha.finalize())
+        return localizedKey
+    }
     /// This is untested as of 8Aug2022
     internal static func passwordToMd5Key(password: String, engineId: Data) -> Data {
         // https://datatracker.ietf.org/doc/html/rfc3414#appendix-A.2.1
@@ -296,6 +326,33 @@ public struct SnmpV3Message: CustomDebugStringConvertible {
         //print("RESULT COUNT \(result.count)")
         return result[0..<24]
     }
+    internal static func sha512Parameters(messageData: Data, password: String, engineId: Data) -> Data {
+        // utf8 encoding should never fail
+        let expectedAuthKeyLength = 64 // for SHA512
+        var authKeyData = SnmpV3Message.passwordToSha512Key(password: password, engineId: engineId)
+        // see https://datatracker.ietf.org/doc/html/rfc3414#section-6.3.1
+        // see https://datatracker.ietf.org/doc/html/rfc7860#section-5
+        if authKeyData.count > expectedAuthKeyLength {
+            authKeyData = authKeyData[0..<expectedAuthKeyLength]
+        }
+        let bytesNeeded = 128 - authKeyData.count // blocksize sha512 = 128, sha256 sha1 md5 = 64
+        let nullData = Data(count: bytesNeeded)
+        authKeyData = authKeyData + nullData
+        let ipad = Data(repeating: 0x36, count: 128)
+        var k1 = Data(count: 128)
+        let opad = Data(repeating: 0x5c, count: 128)
+        var k2 = Data(count: 128)
+        for position in 0..<128 {
+            k1[position] = ipad[position] ^ authKeyData[position]
+            k2[position] = opad[position] ^ authKeyData[position]
+        }
+        let digest1 = SHA512.hash(data: k1 + messageData)
+        let digest2 = SHA512.hash(data: k2 + digest1)
+        let result: Data = Data(digest2)
+        //print("RESULT COUNT \(result.count)")
+        // see https://datatracker.ietf.org/doc/html/rfc7860#section-4
+        return result[0..<48]
+    }
     /// UNTESTED. This should calculate the authentication parameters for the MD5 case
     internal static func md5Parameters(messageData: Data, password: String, engineId: Data) -> Data {
         // utf8 encoding should never fail
@@ -353,6 +410,15 @@ public struct SnmpV3Message: CustomDebugStringConvertible {
             }
             let authData =
             SnmpV3Message.sha256Parameters(messageData: blankData, password: password, engineId: self.engineId)
+            let authenticationParameters = AsnValue(octetStringData: authData)
+            return AsnValue.sequence([engineIdAsn,engineBootsAsn,engineTimeAsn,userNameAsn,authenticationParameters,privacyParametersAsn])
+        case .sha512:
+            let blankData = asnBlankAuth.asnData
+            guard let password = authPassword else {
+                SnmpError.log("Unable to generate authentication data without a password")
+                return AsnValue.sequence([engineIdAsn,engineBootsAsn,engineTimeAsn,userNameAsn,blankAuthenticationParametersAsn,privacyParametersAsn])
+            }
+            let authData = SnmpV3Message.sha512Parameters(messageData: blankData, password: password, engineId: self.engineId)
             let authenticationParameters = AsnValue(octetStringData: authData)
             return AsnValue.sequence([engineIdAsn,engineBootsAsn,engineTimeAsn,userNameAsn,authenticationParameters,privacyParametersAsn])
         }
@@ -590,6 +656,9 @@ extension SnmpV3Message {
             return AsnValue(octetStringData: Data([0,0,0,0,0,0,0,0,0,0,0,0]))
         case .sha256:
             return AsnValue(octetStringData: Data(count: 24))
+        case .sha512:
+            //see https://datatracker.ietf.org/doc/html/rfc7860#section-4
+            return AsnValue(octetStringData: Data(count: 48))
         default:
             return AsnValue(octetStringData: Data())
         }

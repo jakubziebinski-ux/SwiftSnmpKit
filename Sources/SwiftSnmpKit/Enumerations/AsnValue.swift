@@ -4,9 +4,9 @@
 //
 //  Created by Darrell Root on 6/29/22.
 //  See https://luca.ntop.org/Teaching/Appunti/asn1.html
-
+ 
 import Foundation
-
+ 
 /// SNMP messages use ASN.1
 /// https://en.wikipedia.org/wiki/ASN.1 encodings.
 /// This defines how data structures can be encoded into network transmissions.  Some ASN.1 elements constitute individual structures (such as integers or octet strings) while others constitute sequences of ASN.1 elements.
@@ -29,6 +29,7 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
     case snmpGetNext(SnmpPdu)
     case snmpReport(SnmpPdu)
     case noSuchObject
+    case noSuchInstance
     case ipv4(UInt32)
     case counter32(UInt32)
     case gauge32(UInt32)
@@ -66,10 +67,15 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
             return Data([UInt8(length)])
         }
         var octetsReversed: [UInt8] = []
-        var power = 0
-        while (length >= SnmpUtils.powerOf256(power)) {
-            octetsReversed.append(UInt8(length / SnmpUtils.powerOf256(power)))
-            power += 1
+        var remainingLength = length
+        while (remainingLength > 0) {
+            let octet = UInt8(remainingLength % 256)
+            octetsReversed.append(octet)
+            remainingLength = remainingLength/256
+        }
+        
+        guard !octetsReversed.isEmpty else {
+            return Data([0])
         }
         
         let firstOctet = UInt8(octetsReversed.count | 0b10000000)
@@ -77,7 +83,7 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
         let suffix = Data(octetsReversed.reversed())
         return prefix + suffix
     }
-
+ 
     internal func encodeInteger(_ value: Int64) -> Data {
         if value > -129 && value < 128 {
             let bitPattern = Int8(value)
@@ -150,7 +156,7 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
         }
         return result
     }
-
+ 
     internal var asnData: Data {
         switch self {
             
@@ -223,6 +229,8 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
             return timeData
         case .noSuchObject:
             return Data([0x80,0x00])
+        case .noSuchInstance:
+            return Data([0x81, 0x00])
         case .ipv4(let value):
             var ipv4Data = Data(capacity: 6)
             ipv4Data[0] = 0x40
@@ -302,7 +310,7 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
             return
         case 4:
             // Octet String
-
+ 
             guard data.count > 1 else {
                 throw SnmpError.badLength
             }
@@ -427,6 +435,9 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
         case 0x80:
             self = .noSuchObject
             return
+        case 0x81:
+            self = .noSuchInstance
+            return
         case 0x82:
             self = .endOfMibView
             return
@@ -459,11 +470,15 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
         guard data.count > 1 else {
             throw SnmpError.badLength
         }
-        if data[data.startIndex+1] < 128 {
+        let firstLengthByte = data[data.startIndex + 1]
+        
+        //short
+        if firstLengthByte < 128 {
             return 2
-        } else {
-            return Int(data[data.startIndex+1]) - 126
         }
+        
+        let numberLengthBytes = Int(firstLengthByte & 0b01111111)
+        return 2 + numberLengthBytes
     }
     static func valueLength(data: Data) throws -> Int {
         // pass the octet that starts the length term
@@ -541,8 +556,10 @@ public enum AsnValue: Equatable, CustomStringConvertible, AsnData {
             return "NoSuchObject"
         case .endOfMibView:
             return "EndOfMibView"
-
+        case .noSuchInstance:
+            return "NoSuchInstance"
+ 
         }
     }
-
+ 
 }

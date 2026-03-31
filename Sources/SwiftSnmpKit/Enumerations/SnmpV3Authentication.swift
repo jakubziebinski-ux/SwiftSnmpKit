@@ -12,5 +12,6 @@ public enum SnmpV3Authentication {
     case md5  // never successfully tested
     case sha1
     case sha256
+    case sha512
     case yes // for inbound replies where we don't know the type of authentication
 }

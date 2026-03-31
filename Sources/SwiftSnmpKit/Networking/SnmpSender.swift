@@ -1,14 +1,14 @@
 //
 //  File.swift
-//  
+//
 //
 //  Created by Darrell Root on 7/12/22.
 //
-
+ 
 import Foundation
 import NIOCore
 import NIOPosix
-
+ 
 /// SnmpSender is a singleton class which handles sending and receiving SNMP messages
 /// It maintains several internal state tables to record SNMP
 /// EngineIDs, EngineBoots, and BootDates gathered from SNMPv3 reports
@@ -30,14 +30,14 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     /// require 3 attempts, so the client-facing timeout may be 3 times
     /// this value.
     public static var snmpTimeout: UInt64 = 5
-
+ 
     // maps messageID to decryption key
     internal var localizedKeys: [Int32:[UInt8]] = [:]
     
     /// This is a record of outstanding SNMP requests and the continuation
     /// that must be called when the reply is received.  The continuation
     /// could also be triggered by a timeout.  Triggering the same continuation twice will trigger a crash.
-    private var snmpRequests: [Int32:CheckedContinuation<Result<SnmpVariableBinding, Error>, Never>] = [:]
+    private var snmpRequests: [Int32:CheckedContinuation<Result<[SnmpVariableBinding], Error>, Never>] = [:]
     
     /// Key is SNMP Agent hostname or IP in String format
     /// Value is SnmpEngineBoots Int as reported by SNMP agent
@@ -71,7 +71,7 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     ///   - message: SNMPv2 message that was sent
     ///   - continuation: The continuation to trigger
     ///   Warning: triggering the same continuation twice will trigger a crash.
-    internal func sent(message: SnmpV2Message, continuation: CheckedContinuation<Result<SnmpVariableBinding, Error>, Never>) {
+    internal func sent(message: SnmpV2Message, continuation: CheckedContinuation<Result<[SnmpVariableBinding], Error>, Never>) {
         let requestId = message.requestId
         snmpRequests[requestId] = continuation
         Task.detached {
@@ -91,7 +91,7 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     ///   - message: SNMPv3 message that was sent
     ///   - continuation: The continuation to trigger
     ///   Warning: triggering the same continuation twice will trigger a crash.
-    internal func sent(message: SnmpV3Message, continuation: CheckedContinuation<Result<SnmpVariableBinding, Error>, Never>) {
+    internal func sent(message: SnmpV3Message, continuation: CheckedContinuation<Result<[SnmpVariableBinding], Error>, Never>) {
         let requestId = message.messageId
         snmpRequests[requestId] = continuation
         Task.detached {
@@ -123,7 +123,7 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
         }
         snmpRequests[message.requestId] = nil
         SnmpError.debug("about to continue \(continuation)")
-        continuation.resume(with: .success(.success(message.variableBindings.first!)))
+        continuation.resume(with: .success(.success(message.variableBindings)))
     }
     
     internal func received(message: SnmpV3Message) {
@@ -139,39 +139,42 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
             return
         }
         guard snmpPdu.pduType != .snmpReport else {
-            guard let variableBinding = snmpPdu.variableBindings.first else {
+            guard let variableBindings = snmpPdu.variableBindings as? [SnmpVariableBinding] else {
                 SnmpError.log("Unexpectedly received SNMPv3 report without a variable binding \(message)")
                 continuation.resume(with: .success(.failure(SnmpError.snmpResponseError)))
                 return
             }
-            switch variableBinding.oid {
-            case SnmpOid("1.3.6.1.6.3.15.1.1.1.0"):
-                continuation.resume(with: .success(.failure(SnmpError.snmpUnknownSecurityLevel)))
-            case SnmpOid("1.3.6.1.6.3.15.1.1.2.0"):
-                let engineBoots = message.engineBoots
-                let engineTime = message.engineTime
-                let engineBootTime = Date(timeIntervalSinceNow: -Double(engineTime))
-                if let agentHostname = self.snmpRequestToHost[message.messageId] {
-                    self.snmpEngineBoots[agentHostname] = engineBoots
-                    self.snmpEngineBootDate[agentHostname] = engineBootTime
-                }
-                continuation.resume(with: .success(.failure(SnmpError.snmpNotInTimeWindow)))
-            case SnmpOid("1.3.6.1.6.3.15.1.1.3.0"):
-                continuation.resume(with: .success(.failure(SnmpError.snmpUnknownUser)))
-            case SnmpOid("1.3.6.1.6.3.15.1.1.4.0"):
-                if let host = snmpRequestToHost[message.messageId] {
-                    if !message.engineId.isEmpty {
-                        snmpHostToEngineId[host] = message.engineId.hexString
+            for variableBinding in variableBindings {
+                switch variableBinding.oid {
+                case SnmpOid("1.3.6.1.6.3.15.1.1.1.0"):
+                    continuation.resume(with: .success(.failure(SnmpError.snmpUnknownSecurityLevel)))
+                case SnmpOid("1.3.6.1.6.3.15.1.1.2.0"):
+                    let engineBoots = message.engineBoots
+                    let engineTime = message.engineTime
+                    let engineBootTime = Date(timeIntervalSinceNow: -Double(engineTime))
+                    if let agentHostname = self.snmpRequestToHost[message.messageId] {
+                        self.snmpEngineBoots[agentHostname] = engineBoots
+                        self.snmpEngineBootDate[agentHostname] = engineBootTime
                     }
+                    continuation.resume(with: .success(.failure(SnmpError.snmpNotInTimeWindow)))
+                case SnmpOid("1.3.6.1.6.3.15.1.1.3.0"):
+                    continuation.resume(with: .success(.failure(SnmpError.snmpUnknownUser)))
+                case SnmpOid("1.3.6.1.6.3.15.1.1.4.0"):
+                    if let host = snmpRequestToHost[message.messageId] {
+                        if !message.engineId.isEmpty {
+                            snmpHostToEngineId[host] = message.engineId.hexString
+                        }
+                    }
+                    continuation.resume(with: .success(.failure(SnmpError.snmpUnknownEngineId)))
+                case SnmpOid("1.3.6.1.6.3.15.1.1.5.0"):
+                    continuation.resume(with: .success(.failure(SnmpError.snmpAuthenticationError)))
+                case SnmpOid("1.3.6.1.6.3.15.1.1.6.0"):
+                    continuation.resume(with: .success(.failure(SnmpError.snmpDecryptionError)))
+                default:
+                    SnmpError.log("Received SNMP repsonse with unexpected OID: \(message)")
+                    continuation.resume(with: .success(.failure(SnmpError.snmpResponseError)))
                 }
-                continuation.resume(with: .success(.failure(SnmpError.snmpUnknownEngineId)))
-            case SnmpOid("1.3.6.1.6.3.15.1.1.5.0"):
-                continuation.resume(with: .success(.failure(SnmpError.snmpAuthenticationError)))
-            case SnmpOid("1.3.6.1.6.3.15.1.1.6.0"):
-                continuation.resume(with: .success(.failure(SnmpError.snmpDecryptionError)))
-            default:
-                SnmpError.log("Received SNMP repsonse with unexpected OID: \(message)")
-                continuation.resume(with: .success(.failure(SnmpError.snmpResponseError)))
+                return
             }
             return
         }
@@ -182,7 +185,7 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
         snmpRequests[message.messageId] = nil
         snmpRequestToHost[message.messageId] = nil
         SnmpError.debug("about to continue \(continuation)")
-        continuation.resume(with: .success(.success(snmpPdu.variableBindings.first!)))
+        continuation.resume(with: .success(.success(snmpPdu.variableBindings)))
     }
     
     /// Sends a SNMPv2c Get request asynchronously and adds the requestID to the list of expected responses
@@ -190,17 +193,17 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     ///   - host: IPv4, IPv6, or hostname in String format
     ///   - command: A SnmpPduType.  At this time we only support .getRequest and .getNextRequest
     ///   - community: SNMPv2c community in String format
-    ///   - oid: SnmpOid to be requested
-    /// - Returns: Result(SnmpVariableBinding or SnmpError)
-    public func send(host: String, command: SnmpPduType, community: String, oid: String) async -> Result<SnmpVariableBinding,Error> {
-        guard let oid = SnmpOid(oid) else {
+    ///   - oids: SnmpOids to be requested
+    /// - Returns: Result([SnmpVariableBinding] or SnmpError)
+    public func send(host: String, command: SnmpPduType, community: String, oids: [String]) async -> Result<[SnmpVariableBinding],Error> {
+        guard let oids = oids.map({SnmpOid($0)}) as? [SnmpOid] else {
             return .failure(SnmpError.invalidOid)
         }
         // At this time we only support SNMP get and getNext
         guard command == .getRequest || command == .getNextRequest else {
             return .failure(SnmpError.unsupportedType)
         }
-        let snmpMessage = SnmpV2Message(community: community, command: command, oid: oid)
+        let snmpMessage = SnmpV2Message(community: community, command: command, oids: oids)
         guard let remoteAddress = try? SocketAddress(ipAddress: host, port: SnmpSender.snmpPort) else {
             return .failure(SnmpError.invalidAddress)
         }
@@ -226,29 +229,30 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     ///   - host: SNMP hostname, IPv4, or IPv6 address in string format
     ///   - tempUserName: SNMPv3 agent username
     ///   - pduType: SNMP PDU request type
-    ///   - oid: SNMP OID in string format
+    ///   - oids: SNMP OIDs in array of string format
     ///   - tempAuthenticationType: SNMPv3 authentication type
     ///   - tempPassword: SNMPv3 password if needed, or nil
-    /// - Returns: Result(SnmpVariableBinding or SnmpError)
-    public func send(host: String, userName: String, pduType: SnmpPduType, oid: String, authenticationType: SnmpV3Authentication = .noAuth, authPassword: String? = nil, privPassword: String? = nil) async -> Result<SnmpVariableBinding,Error> {
+    /// - Returns: Result([SnmpVariableBinding] or SnmpError)
+    public func send(host: String, userName: String, pduType: SnmpPduType, oids: [String], authenticationType: SnmpV3Authentication = .noAuth, authPassword: String? = nil, privPassword: String? = nil) async -> Result<[SnmpVariableBinding],Error> {
         guard pduType == .getRequest || pduType == .getNextRequest else {
             return .failure(SnmpError.unsupportedType)
         }
-        guard let oid = SnmpOid(oid) else {
+        guard let oids = oids.map({SnmpOid($0)}) as? [SnmpOid] else {
             return .failure(SnmpError.invalidOid)
         }
+                
         // attempt #1 (may get engineId)
-        let result1 = await self.sendV3(host: host, userName: userName, pduType: pduType, oid: oid, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
+        let result1 = await self.sendV3(host: host, userName: userName, pduType: pduType, oids: oids, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
         guard case let .failure(_) = result1 else {
             return result1
         }
         // attempt #2 (may update time interval)
-        let result2 = await self.sendV3(host: host, userName: userName, pduType: pduType, oid: oid, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
+        let result2 = await self.sendV3(host: host, userName: userName, pduType: pduType, oids: oids, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
         guard case let .failure(_) = result2 else {
             return result2
         }
         // attempt #3 (last chance!)
-        let result3 = await self.sendV3(host: host, userName: userName, pduType: pduType, oid: oid, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
+        let result3 = await self.sendV3(host: host, userName: userName, pduType: pduType, oids: oids, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword)
         return result3
     }
     
@@ -257,15 +261,15 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
     ///   - host: IPv4, IPv6, or hostname in String format
     ///   - command: A SnmpPduType.  At this time we only support .getRequest and .getNextRequest
     ///   - community: SNMPv2c community in String format
-    ///   - oid: SnmpOid to be requested
+    ///   - oids: SnmpOids to be requested
     ///   - privacyPassword: Setting this turns on AES encryption
-    /// - Returns: Result(SnmpVariableBinding or SnmpError)
-    internal func sendV3(host: String, userName tempUserName: String, pduType: SnmpPduType, oid: SnmpOid, authenticationType tempAuthenticationType: SnmpV3Authentication = .noAuth, authPassword tempAuthPassword: String? = nil, privPassword tempPrivPassword: String? = nil) async -> Result<SnmpVariableBinding,Error> {
+    /// - Returns: Result([SnmpVariableBinding] or SnmpError)
+    internal func sendV3(host: String, userName tempUserName: String, pduType: SnmpPduType, oids: [SnmpOid], authenticationType tempAuthenticationType: SnmpV3Authentication = .noAuth, authPassword tempAuthPassword: String? = nil, privPassword tempPrivPassword: String? = nil) async -> Result<[SnmpVariableBinding],Error> {
         // At this time we only support SNMP get and getNext
         guard pduType == .getRequest || pduType == .getNextRequest else {
             return .failure(SnmpError.unsupportedType)
         }
-        let variableBinding = SnmpVariableBinding(oid: oid)
+        let variableBindings = oids.map {SnmpVariableBinding(oid: $0)}
         let authenticationType: SnmpV3Authentication
         // send blank engineId if we don't know engineId
         var engineId: String
@@ -298,10 +302,10 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
         let dateInterval = DateInterval(start: bootDate, end: Date())
         let engineTime = Int(dateInterval.duration)
         
-        guard var snmpMessage = SnmpV3Message(engineId: engineId, userName: userName, type: pduType, variableBindings: [variableBinding], authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword, engineBoots: engineBoots, engineTime: engineTime) else {
+        guard var snmpMessage = SnmpV3Message(engineId: engineId, userName: userName, type: pduType, variableBindings: variableBindings, authenticationType: authenticationType, authPassword: authPassword, privPassword: privPassword, engineBoots: engineBoots, engineTime: engineTime) else {
             return .failure(SnmpError.unexpectedSnmpPdu)
         }
-
+ 
         let data = snmpMessage.asnData
         let buffer = channel.allocator.buffer(bytes: data)
         let envelope = AddressedEnvelope(remoteAddress: remoteAddress, data: buffer)
@@ -316,7 +320,7 @@ public class SnmpSender/*: ChannelInboundHandler*/ {
             sent(message: snmpMessage, continuation: continuation)
         }
     }
-
+ 
     internal func sendData(host: String, port: Int, data: Data) throws {
         guard let shared = SnmpSender.shared else {
             throw SnmpError.otherError
